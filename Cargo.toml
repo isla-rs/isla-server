@@ -1,0 +1,10 @@
+# The crates islas apps are built with, copied from each release of
+# islas and tagged with its version. An app depends on the framework:
+#   islas = { git = "https://github.com/isla-rs/isla-server", tag = "v0.1.0" }
+[workspace]
+resolver = "3"
+members = ["crates/crypto", "sdk", "framework"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"

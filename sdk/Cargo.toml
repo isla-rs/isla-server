@@ -1,0 +1,30 @@
+[package]
+name = "islas-sdk"
+description = "Write islas apps in Rust: the platform's imports and the handler entry point."
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+
+# Built by apps for wasm32-wasip2. It also builds natively, so `cargo check`,
+# `cargo clippy` and `cargo test` work on it; there the host imports are
+# stubs that answer `unavailable`.
+[dependencies]
+# `kv`'s `_json` functions. Generic, so an app that doesn't call them pays
+# only ~0.5 KB (std generics duplicated under serde_json; docs/perf.md).
+serde = { version = "1", default-features = false, features = ["std"] }
+serde_json = "1"
+wit-bindgen = "0.62"
+
+# The `native` feature: the imports in memory, for tests; never in wasm.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
+islas-crypto = { path = "../crates/crypto", optional = true }
+
+[features]
+# For apps' native tests: `db` on an in-memory SQLite, `kv` in a map,
+# `secrets` from a map, `crypto` with the host's primitives under random
+# keys, one of each per thread (`islas_sdk::native`).
+native = ["dep:rusqlite", "dep:islas-crypto"]
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,24 @@
+[package]
+name = "islas"
+description = "The framework islas apps are written in: a router, requests and responses, errors, typed rows, native tests."
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+
+# Built by apps for wasm32-wasip2, on top of islas-sdk (the ABI); apps
+# depend on this crate alone, which re-exports the SDK's modules. It builds
+# natively too, so apps' tests run without the host (feature `native`).
+[dependencies]
+islas-sdk = { path = "../sdk" }
+anyhow = "1"
+serde = { version = "1", default-features = false, features = ["std"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+
+[features]
+# For apps' native tests: `islas::testing`, and the SDK's imports in memory.
+native = ["islas-sdk/native"]
+
+[dev-dependencies]
+islas-sdk = { path = "../sdk", features = ["native"] }
+serde = { version = "1", features = ["derive"] }

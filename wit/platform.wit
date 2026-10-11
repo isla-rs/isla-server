@@ -1,0 +1,249 @@
+/// The interface between an app and the islas host. See docs/abi.md.
+package platform:app@0.1.0;
+
+interface types {
+    /// A connection the host holds for this app (WebSocket or TCP).
+    type conn-id = u64;
+    /// Milliseconds since the Unix epoch.
+    type timestamp = u64;
+
+    /// One message on a connection, in either direction. On a TCP
+    /// connection both cases are bytes (text as UTF-8).
+    variant message {
+        text(string),
+        binary(list<u8>),
+    }
+}
+
+/// The app's own SQLite database.
+interface db {
+    variant value {
+        null,
+        int(s64),
+        real(f64),
+        text(string),
+        blob(list<u8>),
+    }
+
+    record rows {
+        columns: list<string>,
+        rows: list<list<value>>,
+    }
+
+    variant error {
+        /// SQLite's message, including syntax and constraint errors.
+        sql(string),
+        /// The writer was busy past busy_timeout.
+        busy,
+        /// A result over the size limit.
+        too-large,
+        /// begin inside a transaction, or commit / rollback outside one.
+        transaction(string),
+        unavailable(string),
+    }
+
+    query: func(sql: string, params: list<value>) -> result<rows, error>;
+    /// Returns the number of rows changed.
+    execute: func(sql: string, params: list<value>) -> result<u64, error>;
+    /// Binds one connection to this event until commit, rollback or the
+    /// event's end (then rolled back, with a warning in the log).
+    begin: func() -> result<_, error>;
+    commit: func() -> result<_, error>;
+    rollback: func() -> result<_, error>;
+}
+
+/// Small state by key, with optional expiry. Values are bytes; the SDK adds JSON.
+interface kv {
+    variant error {
+        bad-key,
+        too-large,
+        quota-exceeded,
+        unavailable(string),
+    }
+
+    record entry {
+        key: string,
+        value: list<u8>,
+    }
+
+    get: func(key: string) -> result<option<list<u8>>, error>;
+    set: func(key: string, value: list<u8>, ttl-seconds: option<u64>) -> result<_, error>;
+    delete: func(key: string) -> result<_, error>;
+    /// Keys with the prefix, in order, after `start-after`, at most `limit`.
+    %list: func(prefix: string, start-after: option<string>, limit: u32) -> result<list<entry>, error>;
+}
+
+/// The host's job queue, this app's jobs only.
+interface jobs {
+    use types.{timestamp};
+
+    variant error {
+        unknown-job(string),
+        too-large,
+        unavailable(string),
+    }
+
+    /// Returns the job id. `run-at` absent: as soon as possible.
+    enqueue: func(name: string, payload: list<u8>, run-at: option<timestamp>) -> result<u64, error>;
+}
+
+/// Writing to the app's open connections, from any event.
+interface conn {
+    use types.{conn-id, message};
+
+    variant error {
+        unknown-conn,
+        closed,
+        too-large,
+        unavailable(string),
+    }
+
+    send: func(conn: conn-id, message: message) -> result<_, error>;
+    close: func(conn: conn-id) -> result<_, error>;
+    %list: func() -> list<conn-id>;
+}
+
+/// What an app turns on, called from `start`. By default nothing runs.
+interface http {
+    variant error {
+        /// Called outside `start`.
+        not-starting,
+        /// The component has no `incoming-handler` to listen with.
+        no-handler,
+    }
+
+    /// Asks the host to open the app's HTTP listener after `start` returns.
+    /// Calling it again does nothing.
+    listen: func() -> result<_, error>;
+}
+
+interface secrets {
+    /// None when the secret isn't set (or is `ISLAS_SECRET_KEY`, which only
+    /// the host reads: see `crypto`). Values never appear in logs.
+    get: func(name: string) -> option<string>;
+}
+
+/// Sealing and signing under keys the host derives from the app's
+/// `ISLAS_SECRET_KEY`. The app never sees a key (docs/abi.md § crypto).
+interface crypto {
+    variant error {
+        /// An empty label, or one over 256 bytes.
+        bad-label,
+        /// A plaintext or value over 4 KiB.
+        too-large,
+        unavailable(string),
+    }
+
+    /// `plaintext` encrypted and bound to `label` (a cookie's name, a
+    /// purpose): base64url, fit for a cookie as it is.
+    seal: func(label: string, plaintext: list<u8>) -> result<string, error>;
+    /// What `seal` made under the same label and key; none when it was
+    /// changed, sealed under another label or key, or isn't one.
+    open: func(label: string, sealed: string) -> option<list<u8>>;
+    /// A token carrying `value`, bound to `label`, valid for `ttl-seconds`.
+    sign: func(label: string, value: list<u8>, ttl-seconds: u64) -> result<string, error>;
+    /// The value in a token whose signature holds under `label` and that
+    /// hasn't expired; none otherwise.
+    verify: func(label: string, token: string) -> option<list<u8>>;
+}
+
+/// Called once when the app starts (after migrations, before anything is
+/// listened on). The app turns on what it needs here (`http.listen`); the
+/// instance is dropped after, so nothing else it does is kept. An error ends
+/// the start: the process exits and a deploy fails.
+interface start-handler {
+    start: func() -> result<_, string>;
+}
+
+interface ws-handler {
+    use types.{conn-id, message};
+
+    /// `resumed`: the connection was open before the current app version
+    /// started (a deploy or restart); the app has seen no `on-open` for it in
+    /// this version.
+    on-open: func(conn: conn-id, path: string, resumed: bool);
+    on-message: func(conn: conn-id, message: message);
+    on-close: func(conn: conn-id);
+}
+
+interface stream-handler {
+    use types.{conn-id};
+
+    on-open: func(conn: conn-id, resumed: bool);
+    on-data: func(conn: conn-id, data: list<u8>);
+    on-close: func(conn: conn-id);
+}
+
+interface job-handler {
+    variant outcome {
+        ok,
+        /// Back to the queue with backoff, until the attempt limit.
+        retry(string),
+        /// Marked failed at once.
+        fail(string),
+    }
+
+    run: func(name: string, payload: list<u8>, attempt: u32) -> outcome;
+}
+
+/// Everything the host provides to an app.
+world imports {
+    // Clocks, random, stdio, outgoing HTTP.
+    include wasi:http/imports@0.2.12;
+    // `/data` (read-write) and, when the version has a `static/` folder,
+    // `/static` (read-only); both preopened by the host.
+    import wasi:filesystem/types@0.2.12;
+    import wasi:filesystem/preopens@0.2.12;
+    import wasi:cli/environment@0.2.12;
+    // Rust's std imports these in every component.
+    import wasi:cli/exit@0.2.12;
+    import wasi:cli/terminal-input@0.2.12;
+    import wasi:cli/terminal-output@0.2.12;
+    import wasi:cli/terminal-stdin@0.2.12;
+    import wasi:cli/terminal-stdout@0.2.12;
+    import wasi:cli/terminal-stderr@0.2.12;
+
+    import http;
+    import db;
+    import kv;
+    import jobs;
+    import conn;
+    import secrets;
+    import crypto;
+}
+
+/// The whole contract: every import and every handler the host can call.
+/// An app exports `start-handler` and any subset of the others; the host
+/// looks up which ones a component has (docs/abi.md, "Exports").
+world app {
+    include imports;
+
+    export start-handler;
+    export wasi:http/incoming-handler@0.2.12;
+    export ws-handler;
+    export stream-handler;
+    export job-handler;
+}
+
+// The pieces the SDK builds an app from: the imports with `start`, then one
+// world per optional export, so an app carries only the handlers it has.
+world start-app {
+    include imports;
+    export start-handler;
+}
+
+world http-app {
+    export wasi:http/incoming-handler@0.2.12;
+}
+
+world ws-app {
+    export ws-handler;
+}
+
+world stream-app {
+    export stream-handler;
+}
+
+world job-app {
+    export job-handler;
+}
